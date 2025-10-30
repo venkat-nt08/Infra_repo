@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Provision EC2 Infrastructure
       - name: Provision EC2 Infrastructure
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -15,17 +16,17 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo " Updating system packages..."
+            echo "🚀 Updating system packages..."
             sudo apt-get update -y && sudo apt-get upgrade -y
 
-            echo " Installing dependencies (Python, PostgreSQL, Nginx, Git)..."
+            echo "🧩 Installing dependencies (Python, PostgreSQL, Nginx, Git)..."
             sudo apt-get install -y python3 python3-pip python3-venv nginx postgresql postgresql-contrib git ufw
 
-            echo " Enabling and starting essential services..."
+            echo "⚙️ Enabling and starting essential services..."
             sudo systemctl enable nginx postgresql
             sudo systemctl start nginx postgresql
 
-            echo " Configuring PostgreSQL database..."
+            echo "🛠️ Configuring PostgreSQL database..."
             sudo -u postgres psql << 'EOF'
             DO
             $do$
@@ -52,7 +53,7 @@ jobs:
               sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" $PG_CONF
             fi
 
-            echo " Configuring PostgreSQL access control..."
+            echo "🔒 Configuring PostgreSQL access control..."
             if ! grep -q "local   all   postgres" $HBA_CONF; then
               echo "local   all   postgres                                md5" | sudo tee -a $HBA_CONF > /dev/null
             fi
@@ -61,12 +62,12 @@ jobs:
             fi
             sudo systemctl restart postgresql
 
-            echo "Preparing directory structure for app..."
+            echo "📂 Preparing directory structure for app..."
             sudo mkdir -p /var/www/Elden-ATS/{Frontend-ATS,Backend-ATS}
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            echo " Setting up Nginx configuration..."
+            echo "🧱 Setting up Nginx configuration..."
             NGINX_CONF="/etc/nginx/sites-available/elden-ats"
             sudo bash -c "cat > $NGINX_CONF" << 'NGINXCONF'
 server {
@@ -116,13 +117,13 @@ NGINXCONF
             sudo rm -f /etc/nginx/sites-enabled/default
             sudo nginx -t && sudo systemctl restart nginx
 
-            echo " Configuring UFW firewall..."
+            echo "🧠 Configuring UFW firewall..."
             sudo ufw allow 'Nginx Full'
             sudo ufw allow OpenSSH
             sudo ufw --force enable
 
-            echo "Infrastructure setup complete!"
-            echo "Next steps:"
-            echo "   1️Run frontend.yml to deploy frontend"
-            echo "   2️ Run backend.yml to deploy FastAPI backend"
-            echo "   3️Verify site in browser "
+            echo "✅ Infrastructure setup complete!"
+            echo "💡 Next steps:"
+            echo "   1️⃣ Run frontend.yml to deploy frontend"
+            echo "   2️⃣ Run backend.yml to deploy FastAPI backend"
+            echo "   3️⃣ Verify site in browser 🚀"
