@@ -1,0 +1,128 @@
+name: Elden-ATS Infra Setup (Nginx + PostgreSQL + Server Preparation)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-infra:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Provision EC2 Infrastructure
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo " Updating system packages..."
+            sudo apt-get update -y && sudo apt-get upgrade -y
+
+            echo " Installing dependencies (Python, PostgreSQL, Nginx, Git)..."
+            sudo apt-get install -y python3 python3-pip python3-venv nginx postgresql postgresql-contrib git ufw
+
+            echo " Enabling and starting essential services..."
+            sudo systemctl enable nginx postgresql
+            sudo systemctl start nginx postgresql
+
+            echo " Configuring PostgreSQL database..."
+            sudo -u postgres psql << 'EOF'
+            DO
+            $do$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
+                CREATE DATABASE ring;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+                CREATE USER postgres WITH PASSWORD 'postgres';
+              END IF;
+              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
+              ALTER USER postgres CREATEDB;
+            END
+            $do$;
+            \q
+            EOF
+
+            echo "🔧 Configuring PostgreSQL settings..."
+            PG_CONF="/etc/postgresql/14/main/postgresql.conf"
+            HBA_CONF="/etc/postgresql/14/main/pg_hba.conf"
+            if [ -f "$PG_CONF" ]; then
+              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" $PG_CONF
+              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" $PG_CONF
+              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" $PG_CONF
+            fi
+
+            echo " Configuring PostgreSQL access control..."
+            if ! grep -q "local   all   postgres" $HBA_CONF; then
+              echo "local   all   postgres                                md5" | sudo tee -a $HBA_CONF > /dev/null
+            fi
+            if ! grep -q "local   all   ring" $HBA_CONF; then
+              echo "local   all   ring                                    md5" | sudo tee -a $HBA_CONF > /dev/null
+            fi
+            sudo systemctl restart postgresql
+
+            echo "Preparing directory structure for app..."
+            sudo mkdir -p /var/www/Elden-ATS/{Frontend-ATS,Backend-ATS}
+            sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
+            sudo chmod -R 755 /var/www/Elden-ATS
+
+            echo " Setting up Nginx configuration..."
+            NGINX_CONF="/etc/nginx/sites-available/elden-ats"
+            sudo bash -c "cat > $NGINX_CONF" << 'NGINXCONF'
+server {
+    listen 80;
+    server_name _;
+    root /var/www/Elden-ATS/Frontend-ATS/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location ~* \.(?:js|css|ico|png|jpg|jpeg|svg|woff2?)$ {
+        try_files $uri =404;
+        expires 6M;
+        access_log off;
+        add_header Cache-Control "public";
+    }
+
+    # -----------------------
+    # BACKEND (FastAPI)
+    # -----------------------
+    location /backend/ {
+        rewrite ^/backend/?(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # Redirect plain /backend to /backend/
+    location = /backend {
+        return 301 /backend/;
+    }
+
+    # Error pages
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+        root /usr/share/nginx/html;
+    }
+}
+NGINXCONF
+
+            sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo nginx -t && sudo systemctl restart nginx
+
+            echo " Configuring UFW firewall..."
+            sudo ufw allow 'Nginx Full'
+            sudo ufw allow OpenSSH
+            sudo ufw --force enable
+
+            echo "Infrastructure setup complete!"
+            echo "Next steps:"
+            echo "   1️Run frontend.yml to deploy frontend"
+            echo "   2️ Run backend.yml to deploy FastAPI backend"
+            echo "   3️Verify site in browser "
