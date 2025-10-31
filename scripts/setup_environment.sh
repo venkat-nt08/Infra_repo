@@ -3,16 +3,30 @@ set -e
 
 echo "=== 🚀 EC2 Infra Bootstrap (Script Version) started at $(date) ==="
 
-##############################
+#######################################
+# Wait for apt/dpkg locks if needed
+#######################################
+APT_LOCK="/var/lib/apt/lists/lock"
+DPKG_LOCK="/var/lib/dpkg/lock"
+FRONTEND_LOCK="/var/lib/dpkg/lock-frontend"
+
+for LOCK in "$APT_LOCK" "$DPKG_LOCK" "$FRONTEND_LOCK"; do
+  while sudo lsof "$LOCK" >/dev/null 2>&1; do
+    echo "Waiting for lock $LOCK to be released..."
+    sleep 2
+  done
+done
+
+#######################################
 # 1) Basic package setup
-##############################
+#######################################
 echo "Updating apt and installing base packages..."
 sudo apt-get update -y
 sudo apt-get install -y curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential python3 python3-venv python3-pip git postgresql postgresql-contrib nginx nodejs npm
 
-##############################
+#######################################
 # 2) Ensure PostgreSQL service and cluster
-##############################
+#######################################
 echo "Ensuring PostgreSQL service and cluster..."
 PG_VERSION=$(psql --version | grep -oP '\d+' | head -1)
 PG_VERSION=${PG_VERSION:-14}
@@ -36,9 +50,9 @@ for i in {1..60}; do
   sleep 1
 done
 
-##############################
+#######################################
 # 3) Configure PostgreSQL DB and user
-##############################
+#######################################
 echo "Configuring PostgreSQL database and user..."
 
 if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
@@ -59,9 +73,9 @@ else
   echo "❌ ERROR: PostgreSQL not responding, skipping DB/user creation."
 fi
 
-##############################
+#######################################
 # 4) Tune PostgreSQL config
-##############################
+#######################################
 echo "Tuning PostgreSQL configs..."
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 HBA_CONF="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
@@ -80,17 +94,17 @@ fi
 
 sudo systemctl restart postgresql
 
-##############################
+#######################################
 # 5) Prepare app directories
-##############################
+#######################################
 echo "Creating app directories..."
 sudo mkdir -p /var/www/Elden-ATS/Frontend-ATS /var/www/Elden-ATS/Backend-ATS
 sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
 sudo chmod -R 755 /var/www/Elden-ATS
 
-##############################
+#######################################
 # 6) Create Nginx config
-##############################
+#######################################
 NGINX_SITE="/etc/nginx/sites-available/elden-ats"
 if [ ! -f "$NGINX_SITE" ]; then
   sudo tee "$NGINX_SITE" > /dev/null <<NGINXEOF
@@ -120,9 +134,9 @@ NGINXEOF
   sudo nginx -t && sudo systemctl restart nginx
 fi
 
-##############################
+#######################################
 # 7) Python venv + FastAPI backend systemd service
-##############################
+#######################################
 BACKEND_DIR="/var/www/Elden-ATS/Backend-ATS"
 VENV_DIR="$BACKEND_DIR/.venv"
 if [ ! -d "$VENV_DIR" ]; then
@@ -154,18 +168,18 @@ SERVICEEOF
   sudo systemctl enable ats-backend
 fi
 
-##############################
+#######################################
 # 8) Firewall with UFW
-##############################
+#######################################
 if command -v ufw >/dev/null 2>&1; then
   sudo ufw allow 'Nginx Full' || true
   sudo ufw allow OpenSSH || true
   sudo ufw --force enable || true
 fi
 
-##############################
+#######################################
 # 9) Final summary/status
-##############################
+#######################################
 echo ""
 echo "=== ✅ EC2 Infra Bootstrap Completed Successfully ==="
 echo ""
