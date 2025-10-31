@@ -26,358 +26,160 @@ jobs:
             set -eo pipefail
             echo "=== 🚀 EC2 Infra Bootstrap started at $(date) ==="
 
-            # ---------------------------
-            # 1) Basic package setup
-            # ---------------------------
+            # Update and install base packages
             echo "Updating apt and installing base packages..."
             sudo DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              -o Dpkg::Options::="--force-confdef" \
+              -o Dpkg::Options::="--force-confold" \
+              curl gnupg2 ca-certificates lsb-release apt-transport-https \
+              build-essential python3 python3-venv python3-pip git postgresql postgresql-contrib || true
 
-            # ---------------------------
-            # 2) Install Nginx
-            # ---------------------------
+            # Install Nginx
             if ! command -v nginx >/dev/null 2>&1; then
-              echo "Installing Nginx..."
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nginx
+              echo "Installing nginx"
+              sudo apt-get install -y nginx
               sudo systemctl enable nginx
               sudo systemctl start nginx
             else
-              echo "Nginx already installed."
+              echo "Nginx already installed"
             fi
 
-            # ---------------------------
-            # 3) Install Node.js 18
-            # ---------------------------
+            # Install Node.js 18
             if ! command -v node >/dev/null 2>&1; then
-              echo "Installing Node.js 18..."
+              echo "Installing Node.js 18"
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+              sudo apt-get install -y nodejs
             else
               echo "Node.js present: $(node -v)"
             fi
 
-            # ---------------------------
-            # 4) Install Python 3
-            # ---------------------------
-            if ! command -v python3 >/dev/null 2>&1; then
-              echo "Installing Python3..."
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip
-            else
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip || true
-              echo "Python3 present: $(python3 -V)"
-            fi
-
-            # ---------------------------
-            # 5) Install Git
-            # ---------------------------
-            if ! command -v git >/dev/null 2>&1; then
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git
-            fi
-
-            # ---------------------------
-            # 6) Install PostgreSQL 14+
-            # ---------------------------
-            if ! command -v psql >/dev/null 2>&1; then
-              echo "Installing PostgreSQL..."
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
-              echo "PostgreSQL package installed"
-            else
-              echo "PostgreSQL already installed: $(psql --version)"
-            fi
-
-            # Ensure PostgreSQL service is enabled and started
-            echo "Ensuring PostgreSQL service is running..."
-            sudo systemctl enable postgresql
-            sudo systemctl start postgresql
-            
-            # Wait longer for PostgreSQL to fully start
-            echo "Waiting for PostgreSQL to start (up to 60 seconds)..."
-            for i in {1..60}; do
-              if sudo systemctl is-active --quiet postgresql; then
-                echo "✓ PostgreSQL service is active (attempt $i)"
-                break
-              fi
-              echo "Waiting for PostgreSQL service... ($i/60)"
-              sleep 1
-            done
-
-            # Additional wait for socket to be ready
-            echo "Waiting for PostgreSQL socket to be available..."
-            for i in {1..30}; do
-              if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-                echo "✓ PostgreSQL is accepting connections (attempt $i)"
-                break
-              fi
-              if [ -S /var/run/postgresql/.s.PGSQL.5432 ]; then
-                echo "✓ Socket file exists, testing connection..."
-              else
-                echo "Waiting for socket file... ($i/30)"
-              fi
-              sleep 2
-            done
-
-            # Check PostgreSQL status
-            echo "PostgreSQL service status:"
-            sudo systemctl status postgresql --no-pager -l || true
-            
-            # Check if socket exists
-            echo "Checking PostgreSQL socket:"
-            ls -la /var/run/postgresql/ || echo "Socket directory not found"
-            
-            # Check PostgreSQL logs if there's an issue
-            if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-              echo "⚠️ PostgreSQL connection test failed. Checking logs..."
-              sudo journalctl -u postgresql -n 50 --no-pager || true
-              echo "Attempting to restart PostgreSQL..."
-              sudo systemctl restart postgresql
-              sleep 5
-            fi
-
-            # ---------------------------
-            # 7) Configure PostgreSQL DB and user
-            # ---------------------------
-            echo "============================================="
-            echo "Configuring PostgreSQL database and user..."
-            echo "============================================="
-            
-            # Final connection test before proceeding
-            if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-              echo "❌ ERROR: Cannot connect to PostgreSQL"
-              echo "Checking PostgreSQL process:"
-              ps aux | grep postgres || true
-              echo ""
-              echo "Checking PostgreSQL service:"
-              sudo systemctl status postgresql --no-pager || true
-              echo ""
-              echo "PostgreSQL may not be running. Attempting manual start..."
-              sudo pg_ctlcluster $(pg_lsclusters -h | head -1 | awk '{print $1, $2}') start || true
-              sleep 5
-              
-              if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-                echo "❌ CRITICAL: PostgreSQL still not responding. Skipping database setup."
-                echo "⚠️  You will need to manually create the database later."
-                echo "Manual commands:"
-                echo "  sudo systemctl start postgresql"
-                echo "  sudo -u postgres createdb ring"
-                echo "  sudo -u postgres psql -c \"ALTER USER postgres WITH PASSWORD 'postgres';\""
-              else
-                echo "✓ PostgreSQL connection successful after manual start"
-              fi
-            else
-              echo "✓ PostgreSQL connection verified"
-            fi
-
-            # Only proceed with database creation if PostgreSQL is responding
-            if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-              # Create database if it doesn't exist
-              echo "Creating database 'ring' if it doesn't exist..."
-              if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw ring; then
-                echo "✓ Database 'ring' already exists"
-              else
-                sudo -u postgres createdb ring && echo "✓ Database 'ring' created successfully" || echo "✗ Failed to create database"
-              fi
-
-              # Set password for postgres user
-              echo "Setting password for postgres user..."
-              sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';" && \
-                echo "✓ Password set successfully" || echo "✗ Failed to set password"
-
-              # Grant privileges
-              echo "Granting privileges..."
-              sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;" && \
-                echo "✓ Privileges granted" || echo "✗ Failed to grant privileges"
-              
-              sudo -u postgres psql -c "ALTER USER postgres CREATEDB;" && \
-                echo "✓ CREATEDB privilege granted" || echo "✗ Failed to grant CREATEDB"
-
-              # Verify database creation
-              echo ""
-              echo "Verifying database setup..."
-              echo "Databases:"
-              sudo -u postgres psql -l | grep ring && echo "  ✓ Database 'ring' exists" || echo "  ✗ Database 'ring' NOT found"
-              echo "Users:"
-              sudo -u postgres psql -c "\du" | grep postgres && echo "  ✓ User 'postgres' exists" || echo "  ✗ User 'postgres' NOT found"
-            else
-              echo "⚠️  Skipping database creation due to connection issues"
-            fi
-
-            # ---------------------------
-            # 8) Tune PostgreSQL config
-            # ---------------------------
-            echo "Configuring PostgreSQL settings..."
-            
-            # Detect PostgreSQL version
+            # Initialize PostgreSQL cluster if missing
             PG_VERSION=$(psql --version | grep -oP '\d+' | head -1)
-            PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
-            HBA_CONF="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
+            if [ -z "$PG_VERSION" ]; then
+              PG_VERSION=14
+            fi
+            echo "PostgreSQL version detected: $PG_VERSION"
             
-            echo "PostgreSQL version detected: ${PG_VERSION}"
-            echo "Config file: ${PG_CONF}"
-            
-            if [ -f "$PG_CONF" ]; then
-              echo "Updating postgresql.conf..."
-              sudo sed -i "s/^#\?listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF"
-              sudo sed -i "s/^#\?max_connections =.*/max_connections = 100/" "$PG_CONF"
-              sudo sed -i "s/^#\?shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF"
-              echo "✓ postgresql.conf updated"
+            CLUSTER_STATUS=$(pg_lsclusters -h | awk -v ver="$PG_VERSION" '$1==ver && $2=="main" {print $4}')
+            if [ "$CLUSTER_STATUS" != "online" ]; then
+              echo "PostgreSQL main cluster not running or missing, creating cluster..."
+              sudo pg_createcluster $PG_VERSION main --start
             else
-              echo "⚠ postgresql.conf not found at $PG_CONF"
+              echo "PostgreSQL main cluster running"
             fi
 
-            if [ -f "$HBA_CONF" ]; then
-              echo "Updating pg_hba.conf..."
-              # Backup original
-              sudo cp "$HBA_CONF" "${HBA_CONF}.backup.$(date +%Y%m%d)"
-              
-              # Add authentication rules if they don't exist
-              if ! sudo grep -q "^local.*all.*postgres.*md5" "$HBA_CONF"; then
-                echo "local   all             postgres                                md5" | sudo tee -a "$HBA_CONF" > /dev/null
-                echo "✓ Added postgres authentication rule"
-              fi
-              
-              if ! sudo grep -q "^local.*all.*all.*md5" "$HBA_CONF"; then
-                echo "local   all             all                                     md5" | sudo tee -a "$HBA_CONF" > /dev/null
-                echo "✓ Added all users authentication rule"
-              fi
-              
-              echo "✓ pg_hba.conf updated"
-            else
-              echo "⚠ pg_hba.conf not found at $HBA_CONF"
-            fi
-            
-            echo "Restarting PostgreSQL..."
-            sudo systemctl restart postgresql
-            sleep 3
-            
-            # Verify PostgreSQL is running
-            if sudo systemctl is-active --quiet postgresql; then
-              echo "✓ PostgreSQL is running"
-            else
-              echo "✗ PostgreSQL failed to restart"
-            fi
+            # Confirm cluster started
+            pg_lsclusters
 
-            # ---------------------------
-            # 10) Prepare app directories
-            # ---------------------------
-            echo ""
-            echo "============================================="
-            echo "Testing database connection..."
-            echo "============================================="
-            
-            if sudo -u postgres psql -d ring -c "SELECT version();" 2>/dev/null; then
-              echo "✓ Successfully connected to 'ring' database (peer authentication)"
-              sudo -u postgres psql -d ring -c "SELECT version();" | head -3
-            else
-              echo "⚠️ Could not connect to database"
-              echo "This is not critical - database might be created but connection settings need adjustment"
-            fi
-            
-            # Try with password authentication
-            echo ""
-            echo "Testing password authentication..."
-            if PGPASSWORD=postgres psql -h localhost -U postgres -d ring -c "SELECT 1" >/dev/null 2>&1; then
-              echo "✓ Password authentication works"
-            else
-              echo "⚠️ Password authentication not working yet (pg_hba.conf may need updating)"
-            fi
-
-            # ---------------------------
-            # 10) Prepare app directories
-            # ---------------------------
-            echo "Creating application directories..."
+            # Prepare directories for app
             sudo mkdir -p /var/www/Elden-ATS/{Frontend-ATS,Backend-ATS}
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
-            echo "✓ Directories created: /var/www/Elden-ATS/"
 
-            # ---------------------------
-            # 11) Create default Nginx config if not exists
-            # ---------------------------
+            # Modify pg_hba.conf to md5 authentication
+            PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
+            sudo sed -i.bak 's/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(local\s+all\s+all\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+127\.0\.0\.1\/32\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+::1\/128\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo systemctl reload postgresql
+
+            # Configure PostgreSQL DB and user with explicit password for automation
+            echo "Configuring PostgreSQL database and user..."
+            sudo -u postgres PGPASSWORD=postgres psql <<EOF
+            DO
+            \$do\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
+                CREATE DATABASE ring;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+                CREATE USER postgres WITH PASSWORD 'postgres';
+              ELSE
+                ALTER USER postgres WITH PASSWORD 'postgres';
+              END IF;
+              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
+              ALTER USER postgres CREATEDB;
+            END
+            \$do\$;
+            \q
+            EOF
+
+            # Tune postgresql.conf settings
+            PG_CONF="/etc/postgresql/$PG_VERSION/main/postgresql.conf"
+            if [ -f "$PG_CONF" ]; then
+              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF"
+              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF"
+              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF"
+              sudo systemctl restart postgresql
+            fi
+
+            # Set up Nginx config if missing, enable and restart
             NGINX_SITE="/etc/nginx/sites-available/elden-ats"
             if [ ! -f "$NGINX_SITE" ]; then
-              echo "Creating Nginx site configuration..."
-              sudo tee "$NGINX_SITE" > /dev/null <<'NGINXEOF'
+              echo "Creating Nginx site config"
+              sudo tee "$NGINX_SITE" > /dev/null <<NGINXEOF
             server {
                 listen 80;
                 server_name _;
 
-                # Frontend
                 root /var/www/Elden-ATS/Frontend-ATS/dist;
                 index index.html;
 
-                # Frontend routes
                 location / {
-                    try_files $uri $uri/ /index.html;
+                    try_files \$uri \$uri/ /index.html;
                 }
 
-                # Backend API proxy
                 location /backend/ {
-                    rewrite ^/backend/(.*)$ /$1 break;
+                    rewrite ^/backend/?(.*)\$ /\$1 break;
                     proxy_pass http://127.0.0.1:8000;
                     proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Upgrade \$http_upgrade;
                     proxy_set_header Connection "upgrade";
-                    proxy_set_header Host $host;
-                    proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
-                    proxy_cache_bypass $http_upgrade;
-                    proxy_read_timeout 300;
-                    proxy_connect_timeout 300;
+                    proxy_set_header Host \$host;
+                    proxy_cache_bypass \$http_upgrade;
                 }
 
-                # Error pages
                 error_page 500 502 503 504 /50x.html;
-                location = /50x.html {
-                    root /usr/share/nginx/html;
-                }
-
-                # Logging
-                access_log /var/log/nginx/elden-ats-access.log;
-                error_log /var/log/nginx/elden-ats-error.log;
+                location = /50x.html { root /usr/share/nginx/html; }
             }
             NGINXEOF
-              
               sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
               sudo rm -f /etc/nginx/sites-enabled/default
-              
-              echo "Testing Nginx configuration..."
-              if sudo nginx -t; then
-                echo "✓ Nginx configuration is valid"
-                sudo systemctl restart nginx
-                echo "✓ Nginx restarted"
-              else
-                echo "✗ Nginx configuration test failed"
-              fi
+              sudo nginx -t && sudo systemctl restart nginx
             else
-              echo "✓ Nginx site configuration already exists"
+              echo "Nginx site config already present"
             fi
 
-            # ---------------------------
-            # 12) Python venv + systemd for backend
-            # ---------------------------
+            # Setup Backend Python venv or reuse
             VENV_DIR="/var/www/Elden-ATS/Backend-ATS/.venv"
             if [ ! -d "$VENV_DIR" ]; then
-              echo "Creating backend Python virtualenv..."
-              cd /var/www/Elden-ATS/Backend-ATS
-              python3 -m venv .venv
-              chown -R ubuntu:ubuntu .venv
-              echo "✓ Virtual environment created"
+              echo "Creating backend Python virtual environment..."
+              sudo -u ubuntu python3 -m venv "$VENV_DIR"
             else
-              echo "✓ Virtual environment already exists"
+              echo "Backend virtual environment exists"
             fi
 
+            # Run Alembic migrations as ubuntu user
+            echo "Running Alembic migrations..."
+            sudo -u ubuntu bash -c "
+            source /var/www/Elden-ATS/Backend-ATS/.venv/bin/activate &&
+            cd /var/www/Elden-ATS/Backend-ATS &&
+            alembic upgrade head
+            "
+
+            # Setup backend systemd service
             SERVICE_FILE="/etc/systemd/system/ats-backend.service"
             if [ ! -f "$SERVICE_FILE" ]; then
-              echo "Creating systemd service for backend..."
-              sudo tee "$SERVICE_FILE" > /dev/null <<'SERVICEEOF'
+              echo "Creating systemd backend service..."
+              sudo tee "$SERVICE_FILE" > /dev/null <<SERVICEEOF
             [Unit]
             Description=ATS FastAPI backend (uvicorn)
             After=network.target postgresql.service
             Wants=postgresql.service
 
             [Service]
-            Type=simple
             User=ubuntu
             Group=www-data
             WorkingDirectory=/var/www/Elden-ATS/Backend-ATS
@@ -390,71 +192,21 @@ jobs:
             [Install]
             WantedBy=multi-user.target
             SERVICEEOF
-              
               sudo systemctl daemon-reload
               sudo systemctl enable ats-backend
-              echo "✓ Backend service created and enabled"
             else
-              echo "✓ Backend service already exists"
+              echo "Backend service already exists"
             fi
 
-            # ---------------------------
-            # 13) Firewall rules
-            # ---------------------------
+            # Setup firewall with ufw if available
             if command -v ufw >/dev/null 2>&1; then
               echo "Configuring firewall..."
               sudo ufw allow 'Nginx Full' || true
               sudo ufw allow OpenSSH || true
               sudo ufw --force enable || true
-              echo "✓ Firewall configured"
             else
-              echo "⚠ UFW not available"
+              echo "No ufw found, skipping firewall setup"
             fi
 
-            # ---------------------------
-            # 14) Final verification
-            # ---------------------------
-            echo ""
             echo "=== ✅ EC2 Infra Bootstrap Completed Successfully ==="
-            echo ""
-            echo "📊 Installation Summary:"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "🌐 Nginx:        $(nginx -v 2>&1)"
-            echo "🟢 Node.js:      $(node -v)"
-            echo "🐍 Python:       $(python3 --version)"
-            echo "🐘 PostgreSQL:   $(psql --version)"
-            echo "📦 Git:          $(git --version)"
-            echo ""
-            echo "📁 Directories:"
-            echo "   Frontend:     /var/www/Elden-ATS/Frontend-ATS/"
-            echo "   Backend:      /var/www/Elden-ATS/Backend-ATS/"
-            echo ""
-            echo "🗄️  Database:"
-            echo "   Database:     ring"
-            echo "   User:         postgres"
-            echo "   Password:     postgres"
-            echo "   Host:         localhost"
-            echo "   Port:         5432"
-            echo ""
-            echo "🔧 Services Status:"
-            sudo systemctl is-active nginx && echo "   ✓ Nginx:      Running" || echo "   ✗ Nginx:      Stopped"
-            sudo systemctl is-active postgresql && echo "   ✓ PostgreSQL: Running" || echo "   ✗ PostgreSQL: Stopped"
-            sudo systemctl is-enabled ats-backend && echo "   ✓ Backend:    Enabled (not started yet)" || echo "   ✗ Backend:    Not enabled"
-            echo ""
-            echo "🌐 Access URLs:"
-            PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "N/A")
-            echo "   Frontend:     http://${PUBLIC_IP}"
-            echo "   Backend API:  http://${PUBLIC_IP}/backend/"
-            echo "   API Docs:     http://${PUBLIC_IP}/backend/docs"
-            echo ""
-            echo "📝 Next Steps:"
-            echo "   1️⃣  Deploy backend:  Run backend-deploy.yml workflow"
-            echo "   2️⃣  Deploy frontend: Run frontend-deploy.yml workflow"
-            echo "   3️⃣  Test connection:  curl http://${PUBLIC_IP}"
-            echo ""
-            echo "🔐 Database Connection String:"
-            echo "   postgresql://postgres:postgres@localhost:5432/ring"
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "✅ Infrastructure setup complete!"
-            echo "==================================================="
+            echo "Frontend and Backend deployed"
