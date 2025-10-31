@@ -27,7 +27,6 @@ jobs:
             echo "=== 🚀 EC2 Infra Bootstrap started at $(date) ==="
 
             # Update and install base packages
-            echo "Updating apt and installing base packages..."
             sudo DEBIAN_FRONTEND=noninteractive apt-get update -y || true
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
               -o Dpkg::Options::="--force-confdef" \
@@ -35,49 +34,37 @@ jobs:
               curl gnupg2 ca-certificates lsb-release apt-transport-https \
               build-essential python3 python3-venv python3-pip git postgresql postgresql-contrib || true
 
-            # Install Nginx
+            # Install Nginx if missing
             if ! command -v nginx >/dev/null 2>&1; then
-              echo "Installing nginx"
               sudo apt-get install -y nginx
               sudo systemctl enable nginx
               sudo systemctl start nginx
-            else
-              echo "Nginx already installed"
             fi
-
-            # Install Node.js 18
+            
+            # Install Node.js 18 if missing
             if ! command -v node >/dev/null 2>&1; then
-              echo "Installing Node.js 18"
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
               sudo apt-get install -y nodejs
-            else
-              echo "Node.js present: $(node -v)"
             fi
 
-            # Initialize PostgreSQL cluster if missing
-            PG_VERSION=$(psql --version | grep -oP '\d+' | head -1)
-            if [ -z "$PG_VERSION" ]; then
-              PG_VERSION=14
-            fi
-            echo "PostgreSQL version detected: $PG_VERSION"
-            
-            CLUSTER_STATUS=$(pg_lsclusters -h | awk -v ver="$PG_VERSION" '$1==ver && $2=="main" {print $4}')
-            if [ "$CLUSTER_STATUS" != "online" ]; then
-              echo "PostgreSQL main cluster not running or missing, creating cluster..."
-              sudo pg_createcluster $PG_VERSION main --start
-            else
-              echo "PostgreSQL main cluster running"
-            fi
-
-            # Confirm cluster started
-            pg_lsclusters
-
-            # Prepare directories for app
+            # Prepare directories
             sudo mkdir -p /var/www/Elden-ATS/{Frontend-ATS,Backend-ATS}
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            # Modify pg_hba.conf to md5 authentication
+            # Detect PostgreSQL version
+            PG_VERSION=$(psql --version | grep -oP '\d+' | head -1)
+            PG_VERSION=${PG_VERSION:-14}
+            echo "PostgreSQL version detected: $PG_VERSION"
+
+            # Initialize cluster if not existing
+            if [ "$(pg_lsclusters -h | awk -v ver=$PG_VERSION '$1==ver && $2=="main" {print $4}')" != "online" ]; then
+              sudo pg_createcluster $PG_VERSION main --start
+            fi
+
+            pg_lsclusters
+
+            # Update pg_hba.conf for md5 password authentication
             PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
             sudo sed -i.bak 's/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/' "$PG_HBA"
             sudo sed -i -r 's/^(local\s+all\s+all\s+)(peer|trust)/\1md5/' "$PG_HBA"
@@ -85,8 +72,7 @@ jobs:
             sudo sed -i -r 's/^(host\s+all\s+all\s+::1\/128\s+)(peer|trust)/\1md5/' "$PG_HBA"
             sudo systemctl reload postgresql
 
-            # Configure PostgreSQL DB and user with explicit password for automation
-            echo "Configuring PostgreSQL database and user..."
+            # Set up database and user with password via environment variable for psql
             sudo -u postgres PGPASSWORD=postgres psql <<EOF
             DO
             \$do\$
@@ -106,7 +92,7 @@ jobs:
             \q
             EOF
 
-            # Tune postgresql.conf settings
+            # PostgreSQL tuning
             PG_CONF="/etc/postgresql/$PG_VERSION/main/postgresql.conf"
             if [ -f "$PG_CONF" ]; then
               sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF"
@@ -115,10 +101,9 @@ jobs:
               sudo systemctl restart postgresql
             fi
 
-            # Set up Nginx config if missing, enable and restart
+            # Setup Nginx site if missing
             NGINX_SITE="/etc/nginx/sites-available/elden-ats"
             if [ ! -f "$NGINX_SITE" ]; then
-              echo "Creating Nginx site config"
               sudo tee "$NGINX_SITE" > /dev/null <<NGINXEOF
             server {
                 listen 80;
@@ -148,31 +133,24 @@ jobs:
               sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
               sudo rm -f /etc/nginx/sites-enabled/default
               sudo nginx -t && sudo systemctl restart nginx
-            else
-              echo "Nginx site config already present"
             fi
 
-            # Setup Backend Python venv or reuse
+            # Setup python env for backend
             VENV_DIR="/var/www/Elden-ATS/Backend-ATS/.venv"
             if [ ! -d "$VENV_DIR" ]; then
-              echo "Creating backend Python virtual environment..."
               sudo -u ubuntu python3 -m venv "$VENV_DIR"
-            else
-              echo "Backend virtual environment exists"
             fi
 
             # Run Alembic migrations as ubuntu user
-            echo "Running Alembic migrations..."
             sudo -u ubuntu bash -c "
             source /var/www/Elden-ATS/Backend-ATS/.venv/bin/activate &&
             cd /var/www/Elden-ATS/Backend-ATS &&
             alembic upgrade head
             "
 
-            # Setup backend systemd service
+            # Create systemd backend service if missing
             SERVICE_FILE="/etc/systemd/system/ats-backend.service"
             if [ ! -f "$SERVICE_FILE" ]; then
-              echo "Creating systemd backend service..."
               sudo tee "$SERVICE_FILE" > /dev/null <<SERVICEEOF
             [Unit]
             Description=ATS FastAPI backend (uvicorn)
@@ -180,6 +158,7 @@ jobs:
             Wants=postgresql.service
 
             [Service]
+            Type=simple
             User=ubuntu
             Group=www-data
             WorkingDirectory=/var/www/Elden-ATS/Backend-ATS
@@ -194,19 +173,14 @@ jobs:
             SERVICEEOF
               sudo systemctl daemon-reload
               sudo systemctl enable ats-backend
-            else
-              echo "Backend service already exists"
             fi
 
-            # Setup firewall with ufw if available
+            # UFW Firewall setup
             if command -v ufw >/dev/null 2>&1; then
-              echo "Configuring firewall..."
               sudo ufw allow 'Nginx Full' || true
               sudo ufw allow OpenSSH || true
               sudo ufw --force enable || true
-            else
-              echo "No ufw found, skipping firewall setup"
             fi
 
             echo "=== ✅ EC2 Infra Bootstrap Completed Successfully ==="
-            echo "Frontend and Backend deployed"
+
