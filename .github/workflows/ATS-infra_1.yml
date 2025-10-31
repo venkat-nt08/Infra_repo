@@ -80,48 +80,126 @@ jobs:
             if ! command -v psql >/dev/null 2>&1; then
               echo "Installing PostgreSQL..."
               sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
-              sudo systemctl enable postgresql
-              sudo systemctl start postgresql
-              sleep 3
+              echo "PostgreSQL package installed"
             else
-              echo "PostgreSQL already installed."
+              echo "PostgreSQL already installed: $(psql --version)"
+            fi
+
+            # Ensure PostgreSQL service is enabled and started
+            echo "Ensuring PostgreSQL service is running..."
+            sudo systemctl enable postgresql
+            sudo systemctl start postgresql
+            
+            # Wait longer for PostgreSQL to fully start
+            echo "Waiting for PostgreSQL to start (up to 60 seconds)..."
+            for i in {1..60}; do
+              if sudo systemctl is-active --quiet postgresql; then
+                echo "✓ PostgreSQL service is active (attempt $i)"
+                break
+              fi
+              echo "Waiting for PostgreSQL service... ($i/60)"
+              sleep 1
+            done
+
+            # Additional wait for socket to be ready
+            echo "Waiting for PostgreSQL socket to be available..."
+            for i in {1..30}; do
+              if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
+                echo "✓ PostgreSQL is accepting connections (attempt $i)"
+                break
+              fi
+              if [ -S /var/run/postgresql/.s.PGSQL.5432 ]; then
+                echo "✓ Socket file exists, testing connection..."
+              else
+                echo "Waiting for socket file... ($i/30)"
+              fi
+              sleep 2
+            done
+
+            # Check PostgreSQL status
+            echo "PostgreSQL service status:"
+            sudo systemctl status postgresql --no-pager -l || true
+            
+            # Check if socket exists
+            echo "Checking PostgreSQL socket:"
+            ls -la /var/run/postgresql/ || echo "Socket directory not found"
+            
+            # Check PostgreSQL logs if there's an issue
+            if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
+              echo "⚠️ PostgreSQL connection test failed. Checking logs..."
+              sudo journalctl -u postgresql -n 50 --no-pager || true
+              echo "Attempting to restart PostgreSQL..."
+              sudo systemctl restart postgresql
+              sleep 5
             fi
 
             # ---------------------------
             # 7) Configure PostgreSQL DB and user
             # ---------------------------
+            echo "============================================="
             echo "Configuring PostgreSQL database and user..."
+            echo "============================================="
             
-            # Wait for PostgreSQL to be ready
-            echo "Waiting for PostgreSQL to be ready..."
-            for i in {1..30}; do
-              if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
-                echo "PostgreSQL is ready!"
-                break
+            # Final connection test before proceeding
+            if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
+              echo "❌ ERROR: Cannot connect to PostgreSQL"
+              echo "Checking PostgreSQL process:"
+              ps aux | grep postgres || true
+              echo ""
+              echo "Checking PostgreSQL service:"
+              sudo systemctl status postgresql --no-pager || true
+              echo ""
+              echo "PostgreSQL may not be running. Attempting manual start..."
+              sudo pg_ctlcluster $(pg_lsclusters -h | head -1 | awk '{print $1, $2}') start || true
+              sleep 5
+              
+              if ! sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
+                echo "❌ CRITICAL: PostgreSQL still not responding. Skipping database setup."
+                echo "⚠️  You will need to manually create the database later."
+                echo "Manual commands:"
+                echo "  sudo systemctl start postgresql"
+                echo "  sudo -u postgres createdb ring"
+                echo "  sudo -u postgres psql -c \"ALTER USER postgres WITH PASSWORD 'postgres';\""
+              else
+                echo "✓ PostgreSQL connection successful after manual start"
               fi
-              echo "Waiting for PostgreSQL... ($i/30)"
-              sleep 2
-            done
+            else
+              echo "✓ PostgreSQL connection verified"
+            fi
 
-            # Create database if it doesn't exist
-            echo "Creating database 'ring' if it doesn't exist..."
-            sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'ring'" | grep -q 1 || \
-            sudo -u postgres psql -c "CREATE DATABASE ring;"
+            # Only proceed with database creation if PostgreSQL is responding
+            if sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1; then
+              # Create database if it doesn't exist
+              echo "Creating database 'ring' if it doesn't exist..."
+              if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw ring; then
+                echo "✓ Database 'ring' already exists"
+              else
+                sudo -u postgres createdb ring && echo "✓ Database 'ring' created successfully" || echo "✗ Failed to create database"
+              fi
 
-            # Note: 'postgres' user already exists by default in PostgreSQL
-            # Set password for postgres user
-            echo "Setting password for postgres user..."
-            sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';"
+              # Set password for postgres user
+              echo "Setting password for postgres user..."
+              sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';" && \
+                echo "✓ Password set successfully" || echo "✗ Failed to set password"
 
-            # Grant privileges
-            echo "Granting privileges..."
-            sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;"
-            sudo -u postgres psql -c "ALTER USER postgres CREATEDB;"
+              # Grant privileges
+              echo "Granting privileges..."
+              sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;" && \
+                echo "✓ Privileges granted" || echo "✗ Failed to grant privileges"
+              
+              sudo -u postgres psql -c "ALTER USER postgres CREATEDB;" && \
+                echo "✓ CREATEDB privilege granted" || echo "✗ Failed to grant CREATEDB"
 
-            # Verify database creation
-            echo "Verifying database setup..."
-            sudo -u postgres psql -l | grep ring && echo "✓ Database 'ring' exists" || echo "✗ Database 'ring' NOT found"
-            sudo -u postgres psql -c "\du" | grep postgres && echo "✓ User 'postgres' exists" || echo "✗ User 'postgres' NOT found"
+              # Verify database creation
+              echo ""
+              echo "Verifying database setup..."
+              echo "Databases:"
+              sudo -u postgres psql -l | grep ring && echo "  ✓ Database 'ring' exists" || echo "  ✗ Database 'ring' NOT found"
+              echo "Users:"
+              sudo -u postgres psql -c "\du" | grep postgres && echo "  ✓ User 'postgres' exists" || echo "  ✗ User 'postgres' NOT found"
+            else
+              echo "⚠️  Skipping database creation due to connection issues"
+            fi
 
             # ---------------------------
             # 8) Tune PostgreSQL config
@@ -179,20 +257,28 @@ jobs:
             fi
 
             # ---------------------------
-            # 9) Test database connection
+            # 10) Prepare app directories
             # ---------------------------
+            echo ""
+            echo "============================================="
             echo "Testing database connection..."
-            if PGPASSWORD=postgres psql -h localhost -U postgres -d ring -c "SELECT version();" >/dev/null 2>&1; then
-              echo "✓ Successfully connected to 'ring' database"
-              PGPASSWORD=postgres psql -h localhost -U postgres -d ring -c "SELECT version();" | head -3
+            echo "============================================="
+            
+            if sudo -u postgres psql -d ring -c "SELECT version();" 2>/dev/null; then
+              echo "✓ Successfully connected to 'ring' database (peer authentication)"
+              sudo -u postgres psql -d ring -c "SELECT version();" | head -3
             else
-              echo "⚠ Could not connect to database with password. Trying without password..."
-              if sudo -u postgres psql -d ring -c "SELECT version();" >/dev/null 2>&1; then
-                echo "✓ Connected to 'ring' database (peer authentication)"
-                sudo -u postgres psql -d ring -c "SELECT version();" | head -3
-              else
-                echo "✗ Database connection test failed"
-              fi
+              echo "⚠️ Could not connect to database"
+              echo "This is not critical - database might be created but connection settings need adjustment"
+            fi
+            
+            # Try with password authentication
+            echo ""
+            echo "Testing password authentication..."
+            if PGPASSWORD=postgres psql -h localhost -U postgres -d ring -c "SELECT 1" >/dev/null 2>&1; then
+              echo "✓ Password authentication works"
+            else
+              echo "⚠️ Password authentication not working yet (pg_hba.conf may need updating)"
             fi
 
             # ---------------------------
