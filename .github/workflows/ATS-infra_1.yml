@@ -21,17 +21,17 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          script_stop: true
+          script_stop: false
           script: |
-            set -euo pipefail
+            set -eo pipefail
             echo "=== 🚀 EC2 Infra Bootstrap started at $(date) ==="
 
             # ---------------------------
             # 1) Basic package setup
             # ---------------------------
             echo "Updating apt and installing base packages..."
-            sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential || true
 
             # ---------------------------
             # 2) Install Nginx
