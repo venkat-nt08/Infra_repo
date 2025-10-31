@@ -14,6 +14,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
           script: |
             echo "🚀 Updating system packages..."
             sudo apt-get update -y && sudo apt-get upgrade -y
@@ -26,22 +27,20 @@ jobs:
             sudo systemctl start nginx postgresql
 
             echo "🛠️ Configuring PostgreSQL database..."
-            sudo -u postgres bash -c "psql -v ON_ERROR_STOP=1 <<'SQL'
-DO
-\$do\$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
-    CREATE DATABASE ring;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
-    CREATE USER postgres WITH PASSWORD 'postgres';
-  END IF;
-  GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
-  ALTER USER postgres CREATEDB;
-END
-\$do\$;
-\\q
-SQL"
+            echo "DO
+            \$do\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
+                CREATE DATABASE ring;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+                CREATE USER postgres WITH PASSWORD 'postgres';
+              END IF;
+              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
+              ALTER USER postgres CREATEDB;
+            END
+            \$do\$;
+            \q" | sudo -u postgres psql
 
             echo "🔧 Configuring PostgreSQL settings..."
             PG_CONF="/etc/postgresql/14/main/postgresql.conf"
@@ -70,7 +69,7 @@ SQL"
             sudo chmod -R 755 /var/www/Elden-ATS
 
             echo "🧱 Setting up Nginx configuration..."
-            cat <<'NGINX' | sudo tee /etc/nginx/sites-available/elden-ats > /dev/null
+            cat <<'EOF' | sudo tee /etc/nginx/sites-available/elden-ats > /dev/null
 server {
     listen 80;
     server_name _;
@@ -108,7 +107,7 @@ server {
         root /usr/share/nginx/html;
     }
 }
-NGINX
+EOF
 
             sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
             sudo rm -f /etc/nginx/sites-enabled/default
