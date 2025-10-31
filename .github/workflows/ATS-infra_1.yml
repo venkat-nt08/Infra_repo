@@ -56,53 +56,28 @@ jobs:
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            # Debug and modify pg_hba.conf to peer auth temporarily
-            PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
-            echo "pg_hba.conf path: $PG_HBA"
-            echo "Current pg_hba.conf entries for local postgres user:"
-            grep "^local\s\+all\s\+postgres" "$PG_HBA"
+            # Set PGPASSWORD env var for postgres commands
+            export PGPASSWORD='postgres'
 
-            echo "Setting local postgres auth to peer..."
-            sudo sed -i.bak 's/^local\s*all\s*postgres\s*md5$/local all postgres peer/' "$PG_HBA"
-
-            echo "Reloading PostgreSQL service..."
-            sudo systemctl reload postgresql
-
-            echo "After reload pg_hba.conf entries for local postgres user:"
-            grep "^local\s\+all\s\+postgres" "$PG_HBA"
-
-            # Configure PostgreSQL DB and user
+            # Configure PostgreSQL DB and user with password env set
             echo "Configuring PostgreSQL database and user..."
-            sudo -u postgres psql <<EOF
-            DO
-            \$do\$
-            BEGIN
-              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
-                CREATE DATABASE ring;
-              END IF;
-              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
-                CREATE USER postgres WITH PASSWORD 'postgres';
-              ELSE
-                ALTER USER postgres WITH PASSWORD 'postgres';
-              END IF;
-              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
-              ALTER USER postgres CREATEDB;
-            END
-            \$do\$;
-            \q
-            EOF
+            sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN CREATE DATABASE ring; END IF; IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN CREATE USER postgres WITH PASSWORD 'postgres'; ELSE ALTER USER postgres WITH PASSWORD 'postgres'; END IF; GRANT ALL PRIVILEGES ON DATABASE ring TO postgres; ALTER USER postgres CREATEDB; END; \$\$;"
 
-            # Revert pg_hba.conf back to md5 for security
-            sudo sed -i.bak 's/^local\s*all\s*postgres\s*peer$/local all postgres md5/' "$PG_HBA"
-            sudo systemctl reload postgresql
-
-            # PostgreSQL config tuning
+            # Tune postgresql.conf for localhost listen and resources
             PG_CONF="/etc/postgresql/14/main/postgresql.conf"
             if [ -f "$PG_CONF" ]; then
               sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF"
               sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF"
               sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF"
             fi
+
+            # Set pg_hba.conf to md5 authentication for proper password auth
+            PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
+            sudo sed -i.bak 's/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(local\s+all\s+all\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+127\.0\.0\.1\/32\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+::1\/128\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo systemctl reload postgresql
 
             # Setup Nginx config if not present
             NGINX_SITE="/etc/nginx/sites-available/elden-ats"
