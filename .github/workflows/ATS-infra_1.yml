@@ -29,7 +29,11 @@ jobs:
             # Install base packages
             echo "Updating apt and installing base packages..."
             sudo DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential python3 python3-venv python3-pip git postgresql postgresql-contrib || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                -o Dpkg::Options::="--force-confdef" \
+                -o Dpkg::Options::="--force-confold" \
+                curl gnupg2 ca-certificates lsb-release apt-transport-https \
+                build-essential python3 python3-venv python3-pip git postgresql postgresql-contrib || true
 
             # Install Nginx if missing
             if ! command -v nginx >/dev/null 2>&1; then
@@ -56,12 +60,34 @@ jobs:
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            # Set PGPASSWORD env var for postgres commands
-            export PGPASSWORD='postgres'
+            # Modify pg_hba.conf to md5 authentication
+            PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
+            sudo sed -i.bak 's/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(local\s+all\s+all\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+127\.0\.0\.1\/32\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo sed -i -r 's/^(host\s+all\s+all\s+::1\/128\s+)(peer|trust)/\1md5/' "$PG_HBA"
+            sudo systemctl reload postgresql
 
-            # Configure PostgreSQL DB and user with password env set
+            # Configure PostgreSQL DB and user with password provided inline
             echo "Configuring PostgreSQL database and user..."
-            sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN CREATE DATABASE ring; END IF; IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN CREATE USER postgres WITH PASSWORD 'postgres'; ELSE ALTER USER postgres WITH PASSWORD 'postgres'; END IF; GRANT ALL PRIVILEGES ON DATABASE ring TO postgres; ALTER USER postgres CREATEDB; END; \$\$;"
+            sudo -u postgres PGPASSWORD=postgres psql <<EOF
+            DO
+            \$do\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
+                CREATE DATABASE ring;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+                CREATE USER postgres WITH PASSWORD 'postgres';
+              ELSE
+                ALTER USER postgres WITH PASSWORD 'postgres';
+              END IF;
+              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
+              ALTER USER postgres CREATEDB;
+            END
+            \$do\$;
+            \q
+            EOF
 
             # Tune postgresql.conf for localhost listen and resources
             PG_CONF="/etc/postgresql/14/main/postgresql.conf"
@@ -70,14 +96,6 @@ jobs:
               sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF"
               sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF"
             fi
-
-            # Set pg_hba.conf to md5 authentication for proper password auth
-            PG_HBA=$(sudo -u postgres psql -t -P format=unaligned -c "SHOW hba_file;")
-            sudo sed -i.bak 's/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/' "$PG_HBA"
-            sudo sed -i -r 's/^(local\s+all\s+all\s+)(peer|trust)/\1md5/' "$PG_HBA"
-            sudo sed -i -r 's/^(host\s+all\s+all\s+127\.0\.0\.1\/32\s+)(peer|trust)/\1md5/' "$PG_HBA"
-            sudo sed -i -r 's/^(host\s+all\s+all\s+::1\/128\s+)(peer|trust)/\1md5/' "$PG_HBA"
-            sudo systemctl reload postgresql
 
             # Setup Nginx config if not present
             NGINX_SITE="/etc/nginx/sites-available/elden-ats"
@@ -114,7 +132,7 @@ jobs:
               sudo nginx -t && sudo systemctl restart nginx
             fi
 
-            # Setup Backend Python virtual environment
+            # Setup Backend Python venv
             VENV_DIR="/var/www/Elden-ATS/Backend-ATS/.venv"
             if [ ! -d "$VENV_DIR" ]; then
               echo "Creating backend Python virtualenv..."
@@ -154,14 +172,14 @@ jobs:
               sudo systemctl enable ats-backend || true
             fi
 
-            # Setup UFW Firewall rules
+            # Setup firewall with UFW
             if command -v ufw >/dev/null 2>&1; then
               sudo ufw allow 'Nginx Full' || true
               sudo ufw allow OpenSSH || true
               sudo ufw --force enable
             fi
 
-            echo "=== ✅ EC2 Infra Bootstrap Completed Successfully ==="
+            echo "===  EC2 Infra Bootstrap Completed Successfully ==="
             echo "🗂  Folders: /var/www/Elden-ATS/"
             echo "🌐 Nginx site: /etc/nginx/sites-available/elden-ats"
             echo "🐘 PostgreSQL DB: ring"
