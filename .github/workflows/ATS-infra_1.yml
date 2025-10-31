@@ -8,7 +8,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Provision EC2 Infrastructure
       - name: Provision EC2 Infrastructure
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -16,18 +15,20 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -euo pipefail
+
             echo "🚀 Updating system packages..."
             sudo apt-get update -y && sudo apt-get upgrade -y
 
-            echo "🧩 Installing dependencies (Python, PostgreSQL, Nginx, Git)..."
+            echo "🧩 Installing dependencies (Python, PostgreSQL, Nginx, Git, UFW)..."
             sudo apt-get install -y python3 python3-pip python3-venv nginx postgresql postgresql-contrib git ufw
 
             echo "⚙️ Enabling and starting essential services..."
             sudo systemctl enable nginx postgresql
             sudo systemctl start nginx postgresql
 
-            echo "🛠️ Configuring PostgreSQL database..."
-            sudo -u postgres psql << 'EOF'
+            echo "🛠️ Configuring PostgreSQL database (idempotent)..."
+            sudo -u postgres psql <<'PSQL' || true
             DO
             $do$
             BEGIN
@@ -42,44 +43,50 @@ jobs:
             END
             $do$;
             \q
-            EOF
+PSQL
 
-            echo "🔧 Configuring PostgreSQL settings..."
+            echo "🔧 Apply PostgreSQL tuning (if config file exists)..."
             PG_CONF="/etc/postgresql/14/main/postgresql.conf"
             HBA_CONF="/etc/postgresql/14/main/pg_hba.conf"
             if [ -f "$PG_CONF" ]; then
-              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" $PG_CONF
-              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" $PG_CONF
-              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" $PG_CONF
+              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF" || true
+              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF" || true
+              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF" || true
             fi
 
-            echo "🔒 Configuring PostgreSQL access control..."
-            if ! grep -q "local   all   postgres" $HBA_CONF; then
-              echo "local   all   postgres                                md5" | sudo tee -a $HBA_CONF > /dev/null
+            echo "🔒 Ensure pg_hba.conf contains local md5 rules..."
+            if [ -f "$HBA_CONF" ]; then
+              if ! sudo grep -qE "^local\s+all\s+postgres" "$HBA_CONF"; then
+                echo "local   all   postgres                                md5" | sudo tee -a "$HBA_CONF" > /dev/null
+              fi
+              if ! sudo grep -qE "^local\s+all\s+ring" "$HBA_CONF"; then
+                echo "local   all   ring                                    md5" | sudo tee -a "$HBA_CONF" > /dev/null
+              fi
+              sudo systemctl restart postgresql
             fi
-            if ! grep -q "local   all   ring" $HBA_CONF; then
-              echo "local   all   ring                                    md5" | sudo tee -a $HBA_CONF > /dev/null
-            fi
-            sudo systemctl restart postgresql
 
             echo "📂 Preparing directory structure for app..."
-            sudo mkdir -p /var/www/Elden-ATS/{Frontend-ATS,Backend-ATS}
+            sudo mkdir -p /var/www/Elden-ATS/Frontend-ATS
+            sudo mkdir -p /var/www/Elden-ATS/Backend-ATS
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            echo "🧱 Setting up Nginx configuration..."
-            NGINX_CONF="/etc/nginx/sites-available/elden-ats"
-            sudo bash -c "cat > $NGINX_CONF" << 'NGINXCONF'
+            echo "🧱 Writing Nginx configuration to a temp file..."
+            TMP_NGINX_CONF="/tmp/elden-ats-nginx.conf"
+            cat > "$TMP_NGINX_CONF" <<'NGINXCONF'
 server {
     listen 80;
     server_name _;
+
     root /var/www/Elden-ATS/Frontend-ATS/dist;
     index index.html;
 
+    # React single-page app routing
     location / {
         try_files $uri $uri/ /index.html;
     }
 
+    # Static assets
     location ~* \.(?:js|css|ico|png|jpg|jpeg|svg|woff2?)$ {
         try_files $uri =404;
         expires 6M;
@@ -87,10 +94,9 @@ server {
         add_header Cache-Control "public";
     }
 
-    # -----------------------
-    # BACKEND (FastAPI)
-    # -----------------------
+    # BACKEND (FastAPI) proxy
     location /backend/ {
+        # strip the /backend/ prefix and pass through the rest
         rewrite ^/backend/?(.*)$ /$1 break;
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -113,17 +119,20 @@ server {
 }
 NGINXCONF
 
+            echo "🧩 Installing Nginx configuration and reloading..."
+            sudo mv "$TMP_NGINX_CONF" /etc/nginx/sites-available/elden-ats
             sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
-            sudo rm -f /etc/nginx/sites-enabled/default
-            sudo nginx -t && sudo systemctl restart nginx
+            sudo rm -f /etc/nginx/sites-enabled/default || true
+            sudo nginx -t
+            sudo systemctl restart nginx
 
-            echo "🧠 Configuring UFW firewall..."
+            echo "🧠 Configuring UFW firewall (allow HTTP + SSH)..."
             sudo ufw allow 'Nginx Full'
             sudo ufw allow OpenSSH
-            sudo ufw --force enable
+            sudo ufw --force enable || true
 
             echo "✅ Infrastructure setup complete!"
             echo "💡 Next steps:"
-            echo "   1️⃣ Run frontend.yml to deploy frontend"
-            echo "   2️⃣ Run backend.yml to deploy FastAPI backend"
-            echo "   3️⃣ Verify site in browser 🚀"
+            echo "   1) Run frontend.yml to deploy frontend"
+            echo "   2) Run backend.yml to deploy FastAPI backend"
+            echo "   3) Verify site in browser"
