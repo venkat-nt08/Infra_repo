@@ -86,22 +86,22 @@ jobs:
             # 7) Configure PostgreSQL DB and user
             # ---------------------------
             echo "Configuring PostgreSQL database and user..."
-            sudo -u postgres psql <<'EOF'
-DO
-$do$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
-    CREATE DATABASE ring;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
-    CREATE USER postgres WITH PASSWORD 'postgres';
-  END IF;
-  GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
-  ALTER USER postgres CREATEDB;
-END
-$do$;
-\q
-EOF
+            sudo -u postgres psql <<EOF
+            DO
+            \$do\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ring') THEN
+                CREATE DATABASE ring;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+                CREATE USER postgres WITH PASSWORD 'postgres';
+              END IF;
+              GRANT ALL PRIVILEGES ON DATABASE ring TO postgres;
+              ALTER USER postgres CREATEDB;
+            END
+            \$do\$;
+            \q
+            EOF
 
             # ---------------------------
             # 8) Tune PostgreSQL config
@@ -138,32 +138,32 @@ EOF
             NGINX_SITE="/etc/nginx/sites-available/elden-ats"
             if [ ! -f "$NGINX_SITE" ]; then
               echo "Creating new Nginx site config..."
-              sudo tee "$NGINX_SITE" > /dev/null <<'EOF'
-server {
-    listen 80;
-    server_name _;
+              sudo tee "$NGINX_SITE" > /dev/null <<NGINXEOF
+            server {
+                listen 80;
+                server_name _;
 
-    root /var/www/Elden-ATS/Frontend-ATS/dist;
-    index index.html;
+                root /var/www/Elden-ATS/Frontend-ATS/dist;
+                index index.html;
 
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
+                location / {
+                    try_files \$uri \$uri/ /index.html;
+                }
 
-    location /backend/ {
-        rewrite ^/backend/?(.*)$ /$1 break;
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
+                location /backend/ {
+                    rewrite ^/backend/?(.*)\$ /\$1 break;
+                    proxy_pass http://127.0.0.1:8000;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_set_header Host \$host;
+                    proxy_cache_bypass \$http_upgrade;
+                }
 
-    error_page 500 502 503 504 /50x.html;
-    location = /50x.html { root /usr/share/nginx/html; }
-}
-EOF
+                error_page 500 502 503 504 /50x.html;
+                location = /50x.html { root /usr/share/nginx/html; }
+            }
+            NGINXEOF
               sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
               sudo rm -f /etc/nginx/sites-enabled/default
               sudo nginx -t && sudo systemctl restart nginx
@@ -181,23 +181,23 @@ EOF
             SERVICE_FILE="/etc/systemd/system/ats-backend.service"
             if [ ! -f "$SERVICE_FILE" ]; then
               echo "Creating systemd service for backend..."
-              sudo tee "$SERVICE_FILE" > /dev/null <<'EOF'
-[Unit]
-Description=ATS FastAPI backend (uvicorn)
-After=network.target
+              sudo tee "$SERVICE_FILE" > /dev/null <<SERVICEEOF
+            [Unit]
+            Description=ATS FastAPI backend (uvicorn)
+            After=network.target
 
-[Service]
-User=ubuntu
-Group=www-data
-WorkingDirectory=/var/www/Elden-ATS/Backend-ATS
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/bin/bash -lc 'source /var/www/Elden-ATS/Backend-ATS/.venv/bin/activate && exec /var/www/Elden-ATS/Backend-ATS/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000'
-Restart=on-failure
-RestartSec=5s
+            [Service]
+            User=ubuntu
+            Group=www-data
+            WorkingDirectory=/var/www/Elden-ATS/Backend-ATS
+            Environment=PYTHONUNBUFFERED=1
+            ExecStart=/bin/bash -lc 'source /var/www/Elden-ATS/Backend-ATS/.venv/bin/activate && exec /var/www/Elden-ATS/Backend-ATS/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000'
+            Restart=on-failure
+            RestartSec=5s
 
-[Install]
-WantedBy=multi-user.target
-EOF
+            [Install]
+            WantedBy=multi-user.target
+            SERVICEEOF
               sudo systemctl daemon-reload
               sudo systemctl enable ats-backend || true
             fi
