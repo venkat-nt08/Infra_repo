@@ -27,25 +27,18 @@ jobs:
             echo "=== 🚀 EC2 Infra Bootstrap started at $(date) ==="
 
             # ---------------------------
-            # 0) Disable interactive prompts
-            # ---------------------------
-            export DEBIAN_FRONTEND=noninteractive
-            export NEEDRESTART_MODE=a
-            export NEEDRESTART_SUSPEND=1
-
-            # ---------------------------
             # 1) Basic package setup
             # ---------------------------
             echo "Updating apt and installing base packages..."
-            sudo apt-get update -y
-            sudo apt-get install -y curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" curl gnupg2 ca-certificates lsb-release apt-transport-https build-essential
 
             # ---------------------------
             # 2) Install Nginx
             # ---------------------------
             if ! command -v nginx >/dev/null 2>&1; then
               echo "Installing Nginx..."
-              sudo apt-get install -y nginx
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nginx
               sudo systemctl enable nginx
               sudo systemctl start nginx
             else
@@ -58,7 +51,7 @@ jobs:
             if ! command -v node >/dev/null 2>&1; then
               echo "Installing Node.js 18..."
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo apt-get install -y nodejs
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
             else
               echo "Node.js present: $(node -v)"
             fi
@@ -68,9 +61,9 @@ jobs:
             # ---------------------------
             if ! command -v python3 >/dev/null 2>&1; then
               echo "Installing Python3..."
-              sudo apt-get install -y python3 python3-venv python3-pip
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip
             else
-              sudo apt-get install -y python3-venv python3-pip || true
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip || true
               echo "Python3 present: $(python3 -V)"
             fi
 
@@ -78,7 +71,7 @@ jobs:
             # 5) Install Git
             # ---------------------------
             if ! command -v git >/dev/null 2>&1; then
-              sudo apt-get install -y git
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git
             fi
 
             # ---------------------------
@@ -86,7 +79,7 @@ jobs:
             # ---------------------------
             if ! command -v psql >/dev/null 2>&1; then
               echo "Installing PostgreSQL..."
-              sudo apt-get install -y postgresql postgresql-contrib
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
               sudo systemctl enable postgresql
               sudo systemctl start postgresql
             else
