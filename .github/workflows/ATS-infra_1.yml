@@ -15,8 +15,6 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
-
             echo "🚀 Updating system packages..."
             sudo apt-get update -y && sudo apt-get upgrade -y
 
@@ -27,8 +25,8 @@ jobs:
             sudo systemctl enable nginx postgresql
             sudo systemctl start nginx postgresql
 
-            echo "🛠️ Configuring PostgreSQL database (idempotent)..."
-            sudo -u postgres bash -c "psql <<'PSQL'
+            echo "🛠️ Configuring PostgreSQL database..."
+            sudo -u postgres bash -c "psql -v ON_ERROR_STOP=1 <<'SQL'
 DO
 \$do\$
 BEGIN
@@ -43,37 +41,36 @@ BEGIN
 END
 \$do\$;
 \\q
-PSQL"
+SQL"
 
-            echo "🔧 Apply PostgreSQL tuning (if config file exists)..."
+            echo "🔧 Configuring PostgreSQL settings..."
             PG_CONF="/etc/postgresql/14/main/postgresql.conf"
             HBA_CONF="/etc/postgresql/14/main/pg_hba.conf"
             if [ -f "$PG_CONF" ]; then
-              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF" || true
-              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF" || true
-              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF" || true
+              sudo sed -i "s/^#listen_addresses =.*/listen_addresses = 'localhost'/" "$PG_CONF"
+              sudo sed -i "s/^#max_connections =.*/max_connections = 100/" "$PG_CONF"
+              sudo sed -i "s/^#shared_buffers =.*/shared_buffers = 256MB/" "$PG_CONF"
             fi
 
-            echo "🔒 Ensure pg_hba.conf contains local md5 rules..."
+            echo "🔒 Configuring PostgreSQL access control..."
             if [ -f "$HBA_CONF" ]; then
-              if ! sudo grep -qE '^local\s+all\s+postgres' "$HBA_CONF"; then
+              if ! grep -q 'local   all   postgres' "$HBA_CONF"; then
                 echo 'local   all   postgres                                md5' | sudo tee -a "$HBA_CONF" > /dev/null
               fi
-              if ! sudo grep -qE '^local\s+all\s+ring' "$HBA_CONF"; then
+              if ! grep -q 'local   all   ring' "$HBA_CONF"; then
                 echo 'local   all   ring                                    md5' | sudo tee -a "$HBA_CONF" > /dev/null
               fi
               sudo systemctl restart postgresql
             fi
 
-            echo "📂 Preparing directory structure for app..."
+            echo "📂 Preparing app directories..."
             sudo mkdir -p /var/www/Elden-ATS/Frontend-ATS
             sudo mkdir -p /var/www/Elden-ATS/Backend-ATS
             sudo chown -R ubuntu:ubuntu /var/www/Elden-ATS
             sudo chmod -R 755 /var/www/Elden-ATS
 
-            echo "🧱 Writing Nginx configuration..."
-            TMP_NGINX_CONF="/tmp/elden-ats-nginx.conf"
-            cat > "$TMP_NGINX_CONF" <<'NGINXCONF'
+            echo "🧱 Setting up Nginx configuration..."
+            cat <<'NGINX' | sudo tee /etc/nginx/sites-available/elden-ats > /dev/null
 server {
     listen 80;
     server_name _;
@@ -111,22 +108,16 @@ server {
         root /usr/share/nginx/html;
     }
 }
-NGINXCONF
+NGINX
 
-            echo "🧩 Installing Nginx configuration and reloading..."
-            sudo mv "$TMP_NGINX_CONF" /etc/nginx/sites-available/elden-ats
             sudo ln -sf /etc/nginx/sites-available/elden-ats /etc/nginx/sites-enabled/elden-ats
-            sudo rm -f /etc/nginx/sites-enabled/default || true
-            sudo nginx -t
-            sudo systemctl restart nginx
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo nginx -t && sudo systemctl restart nginx
 
             echo "🧠 Configuring UFW firewall..."
             sudo ufw allow 'Nginx Full'
             sudo ufw allow OpenSSH
-            sudo ufw --force enable || true
+            sudo ufw --force enable
 
             echo "✅ Infrastructure setup complete!"
-            echo "💡 Next steps:"
-            echo "   1️⃣ Run frontend.yml to deploy frontend"
-            echo "   2️⃣ Run backend.yml to deploy FastAPI backend"
-            echo "   3️⃣ Verify site in browser 🚀"
+            echo "Next: Run frontend.yml and backend.yml for deployments."
